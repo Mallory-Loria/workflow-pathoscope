@@ -5,7 +5,21 @@ import math
 import os
 import shutil
 import numpy as np
-from typing import Tuple
+from typing import Tuple, List, Dict
+from dataclasses import dataclass
+
+
+@dataclass
+class ReadIndex:
+    ref_index: List[int]
+    p_score_list: List[float]
+    p_score: float
+
+
+def convert_read_index(u: dict) -> Dict[str, ReadIndex]:
+    return { key: ReadIndex(ref_index=value[0][1], p_score_list=value[1][0], p_score=value[2]) for key, value in u.items() }
+
+
 
 
 def rescale_samscore(u: dict, nu: dict, max_score: float, min_score: float) -> Tuple[dict, dict]:
@@ -14,17 +28,16 @@ def rescale_samscore(u: dict, nu: dict, max_score: float, min_score: float) -> T
     and nu with scaled value. (add more)
     """
 
-    if min_score < 0:
-        scaling_factor = 100.0 / max_score - min_score
-    else:
-        scaling_factor = 100.0 / max_score
+    scaling_factor = 100.0 / (max_score - min_score) if min_score < 0 else 100.0 / max_score
 
-    for read_index in u:
+    u_matrix = convert_read_index(u)
+
+    for read in u_matrix.values():
+        #u[read_index] = [[ref_index], [p_score], p_score, p_score]
         if min_score < 0:
-            u[read_index][1][0] = u[read_index][1][0] - min_score
+            read.p_score -= min_score
 
-        u[read_index][1][0] = math.exp(u[read_index][1][0] * scaling_factor)
-        u[read_index][3] = u[read_index][1][0]
+        read.p_score = math.exp(read.p_score * scaling_factor)
 
     for read_index in nu:
         nu[read_index][3] = 0.0
@@ -63,10 +76,10 @@ def find_sam_align_score(fields: list) -> float:
     raise ValueError("Could not find alignment score")
 
 
-def build_matrix(vta_path, p_score_cutoff = 0.01) -> Tuple[dict, dict, list, list]:
+def build_matrix(vta_path, p_score_cutoff=0.01) -> Tuple[dict, dict, list, list]:
     """
     Gets read_id, ref_id, and p_score from file in vta_path. These values are then used to create dictionaries u and nu.
-    U then rescaled and trimmed down to only contain the ref_index and p_score and the p_scosre within nu is normalized
+    U then rescaled and trimmed down to only contain the ref_index and p_score and the p_score within nu is normalized
     before the returning the final u and nu.
     The refs and reads are lists containing the ref and read i.d.'s from the file in vta_path.
     """
@@ -75,41 +88,32 @@ def build_matrix(vta_path, p_score_cutoff = 0.01) -> Tuple[dict, dict, list, lis
     refs = []
     reads = []
     p_score_list = []
-    h_read_id = {}
+    read_indexes = {}
     h_ref_id = {}
     ref_count = 0
     read_count = 0
 
-    with open(vta_path, "r") as handle:
-        for line in handle:
+    with open(vta_path, "r") as vta_output:
+        for line in vta_output:
             read_id, ref_id, _, _, p_score = line.rstrip().split(",")
-            p_score = int(float(p_score))
+            p_score = float(p_score)
             p_score_list.append(p_score)
 
             if p_score >= p_score_cutoff:
 
-                ref_index = h_ref_id.get(ref_id, -1)
-
-                if ref_index == -1:
+                if ref_id not in h_ref_id:
                     ref_index = ref_count
                     h_ref_id[ref_id] = ref_index
                     refs.append(ref_id)
                     ref_count += 1
 
-                read_index = h_read_id.get(read_id, -1)
-
-                if read_index == -1:
-                    # hold on this new read. first, wrap previous read profile and see if any previous read has a same
-                    # profile with that!
-                    read_index = read_count
-                    h_read_id[read_id] = read_index
+                if read_id not in read_indexes:
+                    read_indexes[read_id] = read_count
                     reads.append(read_id)
+                    u[read_count] = ReadIndex(ref_index=[ref_index], p_score=p_score, p_score_list=[p_score])
                     read_count += 1
-                    u[read_index] = [[ref_index], [p_score], p_score, p_score]
                 else:
                     if read_index in u:
-                        #myList = ['a', 'b', 'c', 'd']
-                        #>> > for c, element in enumerate(myList):
                         if ref_index == u[read_index][0]:
                             continue
                         nu[read_index] = u[read_index]
@@ -123,8 +127,10 @@ def build_matrix(vta_path, p_score_cutoff = 0.01) -> Tuple[dict, dict, list, lis
 
                     if p_score > nu[read_index][3]:
                         nu[read_index][3] = p_score
-        min_score = min(0, np.amin(p_score_list))
-        max_score = max(0, np.amax(p_score_list))
+
+    min_score = min(0, np.amin(p_score_list))
+    max_score = max(0, np.amax(p_score_list))
+
 
     u, nu = rescale_samscore(u, nu, max_score, min_score)
     for read_index in u:
